@@ -220,9 +220,7 @@ int board_init(void)
 	run_command("gpio clear GPIOT_15", 0);//5G reset
 	run_command("gpio clear GPIOH_3", 0); //pcie reset-gpio
 
-	// FAN testing
-	run_command("i2c dev 6", 0);
-	run_command("i2c mw 0x18 0x96 1", 0);
+	/* Leave the MCU fan test disabled; Linux takes over thermal control. */
 
 	return 0;
 }
