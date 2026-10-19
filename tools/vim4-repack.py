@@ -6,6 +6,7 @@ vendor tool. This does not write any device. See VIM4.md for the build steps.
 """
 import argparse
 import hashlib
+import json
 from pathlib import Path
 import struct
 import subprocess
@@ -20,6 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stock", type=Path)
     parser.add_argument("output", type=Path, help="new, empty output directory")
+    parser.add_argument("--update-bl31", action="store_true",
+                        help="replace BL31 with the signed blob in this source tree")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     stock = args.stock.read_bytes()
@@ -39,9 +42,21 @@ def main():
         (out / f"{part}-nonce.bin").write_bytes(original[offset:offset + 16])
         command += [f"--infile-{part}-payload={out}/{part}-payload.bin",
                     f"--infile-nonce-blob-{part}={out}/{part}-nonce.bin"]
+    blobs = {}
     for part, folder in (("bl40", "bl40/bin"), ("bl31", "bl31/bl31_1.3/bin"),
                          ("bl32", "bl32/bl32_3.8/bin")):
-        command.append(f"--infile-blob-{part}={root}/{folder}/t7/a311d2/blob-{part}.bin.signed")
+        blob = (root / folder / 't7/a311d2' / f'blob-{part}.bin.signed').read_bytes()
+        offset, size = entries[PARTS.index(part)]
+        if len(blob) < size or any(blob[size:]):
+            raise RuntimeError(f'{part} signed blob size or padding changed')
+        if part != 'bl31' or not args.update_bl31:
+            if blob[:size] != original[offset:offset + size]:
+                raise RuntimeError(f'{part} differs from stock without an allowed update')
+        blobs[part] = blob
+        # First round-trip only stock data, including stock BL31.
+        path = out / f'blob-{part}.bin.signed'
+        path.write_bytes(original[offset:offset + size].ljust(len(blob), b'\0'))
+        command.append(f"--infile-blob-{part}={path}")
 
     def pack(name):
         target = out / name
@@ -57,6 +72,8 @@ def main():
     roundtrip = pack("roundtrip.bin")
     if roundtrip[0x8000:] != original[0x8000:]:
         raise RuntimeError("stock round-trip changed a firmware blob")
+    if args.update_bl31:
+        (out / 'blob-bl31.bin.signed').write_bytes(blobs['bl31'])
 
     uboot = (root / "build/u-boot.bin").read_bytes()
     stub = (root / "bl33z/build/bl33z.bin").read_bytes()
@@ -73,16 +90,24 @@ def main():
     (out / "bl33-payload.bin").write_bytes(payload)
     updated = pack("device-fip.bin")
     for part, (offset, size) in zip(PARTS[:4], entries[:4]):
-        if updated[offset:offset + size] != original[offset:offset + size]:
-            raise RuntimeError(f"{part} changed")
+        expected = blobs['bl31'][:size] if part == 'bl31' and args.update_bl31 else original[offset:offset + size]
+        if updated[offset:offset + size] != expected:
+            raise RuntimeError(f"{part} payload verification failed")
     offset, _ = entries[4]
     if updated[offset + 16:offset + 16 + len(payload)] != payload:
         raise RuntimeError("BL33 payload verification failed")
     image = stock[:FIP_OFFSET] + updated
     target = out / "u-boot.bin.sd.bin.signed"
     target.write_bytes(image)
+    report = {'stock_sha256': STOCK_SHA256,
+              'image_sha256': hashlib.sha256(image).hexdigest(),
+              'update_bl31': args.update_bl31,
+              'regions': {part: hashlib.sha256(updated[o:o+s]).hexdigest()
+                          for part, (o, s) in zip(PARTS, entries)},
+              'validation': 'Offline round-trip and payload checks only; not boot-tested'}
+    (out / 'verification.json').write_text(json.dumps(report, indent=2) + '\n')
     print(f"{hashlib.sha256(image).hexdigest()}  {target}")
-    print("Verified stock round-trip, unchanged boot stages/BL30, and new BL33 payload")
+    print("Verified stock round-trip, preserved early stages/BL30/BL40/BL32 and expected BL31/BL33")
 
 
 if __name__ == "__main__":
