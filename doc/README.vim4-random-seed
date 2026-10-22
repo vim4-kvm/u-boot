@@ -1,0 +1,35 @@
+VIM4 boot randomness (offline candidate)
+=======================================
+
+ft_board_setup creates /chosen/kaslr-seed (one big-endian u64) and rng-seed
+(32 opaque bytes) from separate T7 RNG samples. The CFG at 0xfe440788 and
+OUT0 at 0xfe440790 follow the version-2 handshake in the vendor Linux
+common_drivers/drivers/char/hw_random/meson-rng.c. Polls are bounded to 10 ms
+per status bit. No seed value is printed, persisted to the environment, or
+derived from a timer. Obvious stuck output is rejected, but these checks
+are not an entropy certification.
+
+The older CONFIG_AML_KASLR_SEED boot_jump path is disabled for VIM4: it
+requires a pre-existing property, widens only one 32-bit rand() result and
+writes native-endian bytes. It must not overwrite this handoff. The kernel
+still honors an explicit nokaslr command line; the old implicit ramdump
+environment/ramoops_io_en policy is no longer applied. Set nokaslr explicitly
+when debugging requires stable kernel addresses.
+
+Old seed properties are removed before each attempt. Timeout, stuck output,
+or insufficient FDT space leaves both absent and reports a numeric error;
+boot continues without this optional handoff. There is no fallback PRNG.
+Linux 7.3 consumes/clears these properties: a missing live rng-seed property
+alone is not evidence that firmware failed to supply it.
+
+Run python3 tools/test-vim4-random-seed.py and the existing PD handoff test.
+The host test compiles the actual functions and libfdt, with mocked MMIO,
+covering fresh FDTs, retries, byte order, bounded faults and allocation
+rollback. Build and repack as documented in VIM4.md using private O= and
+BL33Z BUILD_BASE directories. No board flash or boot test is implied.
+
+Before any separately authorized flash, compare every non-BL33 device-FIP
+payload against the deployed pd-handoff image and retain its full prefix
+backup. The existing SD/eMMC procedure must preserve sector-zero bytes
+442..511 and the partition layout. A boot failure can require physical SPI
+OOWOW/RESET recovery; this candidate is not suitable for unattended flashing.
