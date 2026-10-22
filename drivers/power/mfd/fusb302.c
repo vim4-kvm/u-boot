@@ -19,8 +19,6 @@
 
 #define FUSB302_I2C_SPEED				400000
 #define FUSB302_I2C_ADDR				0x22
-#define CHARGE_INPUT_DEFAULT_CUR		6000
-#define CHARGE_INPUT_DEFAULT_VOL		12000
 
 #define FUSB302_I2C_BUS_NUM				6
 
@@ -649,28 +647,12 @@ static void set_mesg(struct fusb30x_chip *chip, int cmd, int is_DMT)
 			break;
 		case DMT_REQUEST:
 			chip->send_head |= ((1 << 12) | (cmd & 0xf));
-			/* send request with FVRDO */
+			/* Fixed 5V policy: both current fields use 10mA units. */
 			chip->send_load[0] = (chip->pos_power << 28) |
-					    (0 << 27) |
-					    (1 << 26) |
-					    (0 << 25) |
-					    (0 << 24);
-
-			switch (CAP_POWER_TYPE(chip->rec_load[chip->pos_power - 1])) {
-			case 0:
-				/* Fixed Supply */
-				chip->send_load[0] |= ((CAP_FPDO_VOLTAGE(chip->rec_load[chip->pos_power - 1]) << 10));
-				chip->send_load[0] |= (CAP_FPDO_CURRENT(chip->rec_load[chip->pos_power - 1]) & 0x3ff);
-				break;
-			case 1:
-				/* Battery */
-				chip->send_load[0] |= ((CAP_VPDO_VOLTAGE(chip->rec_load[chip->pos_power - 1]) << 10));
-				chip->send_load[0] |= (CAP_VPDO_CURRENT(chip->rec_load[chip->pos_power - 1]) & 0x3ff);
-				break;
-			default:
-				/* not meet battery caps */
-				break;
-			}
+					    BIT(25) | /* USB Communications Capable */
+					    BIT(24) | /* No USB Suspend */
+					    ((chip->pd_output_cur / 10) << 10) |
+					    (chip->pd_output_cur / 10);
 			break;
 		case DMT_SINKCAPABILITIES:
 			break;
@@ -852,95 +834,40 @@ static void fusb_state_snk_wait_caps(struct fusb30x_chip *chip, int evt)
 	}
 }
 
-static void fusb_set_pos_power(struct fusb30x_chip *chip, int max_vol,
-			       int max_cur)
+static void fusb_select_5v(struct fusb30x_chip *chip)
 {
-	int i;
-	int pos_find;
-	int tmp;
+	int i, current;
 
-	pos_find = 0;
-	for (i = PD_HEADER_CNT(chip->rec_head) - 1; i >= 0; i--) {
-		switch (CAP_POWER_TYPE(chip->rec_load[i])) {
-		case 0:
-			/* Fixed Supply */
-			if ((CAP_FPDO_VOLTAGE(chip->rec_load[i]) * 50) <=
-			    max_vol &&
-			    (CAP_FPDO_CURRENT(chip->rec_load[i]) * 10) <=
-			    max_cur) {
-				chip->pos_power = i + 1;
-				tmp = CAP_FPDO_VOLTAGE(chip->rec_load[i]);
-				chip->pd_output_vol = tmp * 50;
-				tmp = CAP_FPDO_CURRENT(chip->rec_load[i]);
-				chip->pd_output_cur = tmp * 10;
-				pos_find = 1;
-			}
-			break;
-		case 1:
-			/* Battery */
-			if ((CAP_VPDO_VOLTAGE(chip->rec_load[i]) * 50) <=
-			    max_vol &&
-			    (CAP_VPDO_CURRENT(chip->rec_load[i]) * 10) <=
-			    max_cur) {
-				chip->pos_power = i + 1;
-				tmp = CAP_VPDO_VOLTAGE(chip->rec_load[i]);
-				chip->pd_output_vol = tmp * 50;
-				tmp = CAP_VPDO_CURRENT(chip->rec_load[i]);
-				chip->pd_output_cur = tmp * 10;
-				pos_find = 1;
-			}
-			break;
-		default:
-			/* not meet battery caps */
-			break;
-		}
-		if (pos_find)
-			break;
+	chip->pos_power = 0;
+	chip->pd_output_vol = 0;
+	chip->pd_output_cur = 0;
+	/* KVM policy, independent of the charge IC's higher voltage limit. */
+	for (i = 0; i < PD_HEADER_CNT(chip->rec_head); i++) {
+		if (CAP_POWER_TYPE(chip->rec_load[i]) != 0 ||
+		    CAP_FPDO_VOLTAGE(chip->rec_load[i]) != 100)
+			continue;
+		current = CAP_FPDO_CURRENT(chip->rec_load[i]);
+		if (!current)
+			continue;
+		if (current > 300)
+			current = 300;
+		chip->pos_power = i + 1;
+		chip->pd_output_vol = 5000;
+		chip->pd_output_cur = current * 10;
+		/* 3A is a ceiling, not a minimum: no Capability Mismatch. */
+		break;
 	}
-}
-
-static int fusb302_set_pos_power_by_charge_ic(struct fusb30x_chip *chip)
-{
-	int max_vol = CHARGE_INPUT_DEFAULT_VOL, max_cur = CHARGE_INPUT_DEFAULT_CUR;
-
-	if (max_vol > 0 && max_cur > 0)
-		fusb_set_pos_power(chip, max_vol, max_cur);
-
-	printf("charge ic max_vol = %dmv max_cur = %dma\n", max_vol, max_cur);
-	return 0;
 }
 
 static void fusb_state_snk_evaluate_caps(struct fusb30x_chip *chip, int evt)
 {
-	u32 tmp;
-
 	boot_pd.source_header = chip->rec_head;
 	boot_pd.count = PD_HEADER_CNT(chip->rec_head);
 	memset(boot_pd.pdo, 0, sizeof(boot_pd.pdo));
 	memcpy(boot_pd.pdo, chip->rec_load, boot_pd.count * sizeof(u32));
 
 	chip->hardrst_count = 0;
-	chip->pos_power = 0;
-
-	for (tmp = 0; tmp < PD_HEADER_CNT(chip->rec_head); tmp++) {
-		switch (CAP_POWER_TYPE(chip->rec_load[tmp])) {
-		case 0:
-			/* Fixed Supply */
-			if (CAP_FPDO_VOLTAGE(chip->rec_load[tmp]) <= 100)
-				chip->pos_power = tmp + 1;
-			break;
-		case 1:
-			/* Battery */
-			if (CAP_VPDO_VOLTAGE(chip->rec_load[tmp]) <= 100)
-				chip->pos_power = tmp + 1;
-			break;
-		default:
-			/* not meet battery caps */
-			break;
-		}
-	}
-
-	fusb302_set_pos_power_by_charge_ic(chip);
+	fusb_select_5v(chip);
 
 	printf("chip->pos_power = %d, chip->pd_output_vol=%d  chip->pd_output_cur=%d\n",
 				chip->pos_power, chip->pd_output_vol, chip->pd_output_cur);

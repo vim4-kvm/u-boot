@@ -53,3 +53,9 @@ stock input requires `--update-bl31` and comparison with the installed edge
 image to prove BL31 is unchanged. This candidate has not been flashed: existing
 records rely on SPI OOWOW if Linux cannot boot and do not prove a tested
 U-Boot rollback independent of recovery. Do not flash under a no-OOWOW policy.
+
+The PD Request follow-up is offline-only: strict Fixed 5V, at most 3A,
+USB Communications Capable and No USB Suspend. See the snapshot document
+for the removed charging policy and remaining protocol limits. For comparison
+with Linux, run the host test with
+`--linux-pd-source /path/to/vim4-kvm/tools/usb-pd-init.c`.

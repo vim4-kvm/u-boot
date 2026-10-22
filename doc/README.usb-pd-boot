@@ -1,8 +1,8 @@
 VIM4 USB-PD boot snapshot (v1)
 ============================
 
-The FUSB302 driver records existing negotiation events without changing PDO
-selection, Request bytes, register accesses, or delays. ft_board_setup() copies
+The FUSB302 driver records negotiation events without extra register accesses
+or delays. ft_board_setup() copies
 that snapshot into the final Linux FDT after /chosen creation and before FDT
 packing. Both bootm and booti reach image_setup_linux() / image_setup_libfdt();
 the selected kernel's loaded DTB is used, not U-Boot's control DTB. kvim4 has
@@ -42,11 +42,24 @@ Fixed voltage comes from its PDO; operating current comes from RDO bits 19:10
 requested voltage; PPS voltage/current come from its RDO. Preserve unknown APDOs
 as raw values. Never substitute policy values or source ratings for Request.
 
-In particular the unchanged vendor Fixed Request construction uses PDO voltage
-units for its operating-current bits. A 5V/3A PDO can therefore produce RDO
-0x1401912c (1A operating, 3A maximum), despite the existing 5000mV/3000mA policy
-print. This change observes that behavior; it does not correct negotiation.
+The KVM policy selects the first nonzero-current Fixed 5V PDO and caps both
+operating and maximum current at 3A. It sets USB Communications Capable and
+No USB Suspend, giving RDO 0x1304b12c for PDO1 at 5V/3A. The ceiling is not a
+minimum power requirement, so a 1.5A offer requests 1.5A without Capability
+Mismatch. With no usable 5V Fixed PDO, the existing wait-caps/timeout path is
+used without sending a Request. The former charge-IC 12V/6A selection policy
+is removed for every board using this driver: high-voltage charging and
+Battery/Variable PDO requests are no longer supported by this KVM branch.
+This does not change receive timing, add Get_Source_Cap or Hard_Reset, or fix
+the existing IRQ ordering, Soft_Reset and post-boot protocol service gaps.
+
+Older firmware may record 0x1401912c (1A operating, 3A maximum) for a 5V/3A
+offer. The v1 format is unchanged; consumers must still decode the raw RDO.
 
 Run python3 tools/test-vim4-pd-handoff.py for host-only regression with the actual
 driver functions, mocked controller I/O and this tree's libfdt. It tests the
 Request bytes, PS_RDY gate, receive-buffer reuse, hard reset and both DT shapes.
+Pass --linux-pd-source /path/to/vim4-kvm/tools/usb-pd-init.c to compare the
+actual Linux request_5v implementation for every nonzero 10mA current value.
+Linux requires PDO1 to be Fixed 5V; this firmware can select a later Fixed 5V
+PDO and preserves that object's position in the RDO.
