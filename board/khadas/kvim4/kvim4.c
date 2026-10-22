@@ -371,6 +371,8 @@ int ft_board_setup(void *blob, bd_t *bd)
 	ret = vim4_random_seed_fixup(blob);
 	if (ret)
 		printf("Boot random seed handoff unavailable: %d\n", ret);
+	else
+		puts("Boot random seed handoff: kaslr-seed=8 rng-seed=32 bytes\n");
 	return 0;
 }
 
