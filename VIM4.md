@@ -39,3 +39,17 @@ sector zero (disk identity and partition table), as the vendor installer does.
 Read back and compare all written bytes before rebooting. Retain the SPI
 OOWOW recovery environment. Runtime fan `speed` is a requested percentage,
 not a tachometer reading; boot logs alone cannot verify the acoustic effect.
+
+## USB-PD boot handoff candidate
+
+The versioned `/chosen/khadas,usb-pd-boot` snapshot and its limits are described
+in [doc/README.usb-pd-boot](doc/README.usb-pd-boot). Run
+`python3 tools/test-vim4-pd-handoff.py` for host-only event/FDT regression.
+Use a separate worktree and `make O=/absolute/output` for BL33. The repacker
+expects `build/u-boot.bin` and `bl33z/build/bl33z.bin` in that worktree; these
+directories can be symlinks to its private BL33 output and BL33Z `BUILD_BASE`.
+The edge baseline already uses the updated BL31, so repacking from the pinned
+stock input requires `--update-bl31` and comparison with the installed edge
+image to prove BL31 is unchanged. This candidate has not been flashed: existing
+records rely on SPI OOWOW if Linux cannot boot and do not prove a tested
+U-Boot rollback independent of recovery. Do not flash under a no-OOWOW policy.

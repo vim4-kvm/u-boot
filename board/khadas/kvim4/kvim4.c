@@ -362,7 +362,11 @@ int mach_cpu_init(void) {
 
 int ft_board_setup(void *blob, bd_t *bd)
 {
-	/* eg: bl31/32 rsv */
+	int ret = fusb302_fixup_fdt(blob);
+
+	/* Optional telemetry must not prevent either kernel from booting. */
+	if (ret)
+		printf("PD boot FDT handoff unavailable: %s\n", fdt_strerror(ret));
 	return 0;
 }
 

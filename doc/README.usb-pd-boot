@@ -1,0 +1,52 @@
+VIM4 USB-PD boot snapshot (v1)
+============================
+
+The FUSB302 driver records existing negotiation events without changing PDO
+selection, Request bytes, register accesses, or delays. ft_board_setup() copies
+that snapshot into the final Linux FDT after /chosen creation and before FDT
+packing. Both bootm and booti reach image_setup_linux() / image_setup_libfdt();
+the selected kernel's loaded DTB is used, not U-Boot's control DTB. kvim4 has
+CONFIG_OF_BOARD_SETUP=y. The optional handoff failing logs an error but does not
+abort the boot. Runtime tests on both kernels remain required before deployment.
+
+No existing Khadas PD handoff property was found in this tree. The private
+/chosen/khadas,usb-pd-boot property is exactly 16 big-endian u32 cells (64 bytes).
+It describes this firmware's finite startup attempt, not the live Linux contract.
+
+Cell   Meaning
+0      Format version, 1
+1      Flags: bit 0 PS_RDY observed; 1 received hard reset; 2 sent hard reset;
+       3 Request transmission failed / Reject / Wait; 4 loop expired;
+       5 I2C/probe error; 6 sink attached; 7 no confirmed PD at exit (Type-C fallback)
+2      Last evaluated Source_Capabilities header (raw 16 bits)
+3      Last attempted Request header (raw 16 bits)
+4      Last attempted RDO (raw); selected position is bits 30:28
+5      Source PDO count, 0..7
+6      Observed sink CC BC_LVL: 0 unknown/open, 1 USB default, 2 1.5A, 3 3A
+7..8   Driver policy target in mV / mA, NOT the actual RDO operating values
+9..15  Raw Source_Capabilities PDOs, unused cells zero
+
+PS_RDY alone is not proof that all fields are valid: consumers must validate
+version, size, headers, selected PDO, RDO limits and I/O-error/fallback flags.
+Hard reset clears PS_RDY; a later successful attempt may set it again. Error
+flags are sticky for this initialization. Rp is the level already observed at
+attachment, not a new current measurement; USB-default does not imply 3 A or a
+fixed numerical current. Fallback means no confirmed PD contract at exit, not
+proof of a successful post-reset Type-C power transition.
+
+Decode PDO types using the USB PD definitions (Fixed=0, Battery=1, Variable=2,
+APDO=3; APDO subtype 0=PPS). Source and Request headers each carry revision in
+bits 7:6 (0=1.0, 1=2.0, 2=3.0). These do not identify PD 3.1 minor revisions.
+Fixed voltage comes from its PDO; operating current comes from RDO bits 19:10
+(10 mA). Battery uses power, not current; Variable has a voltage range, not a
+requested voltage; PPS voltage/current come from its RDO. Preserve unknown APDOs
+as raw values. Never substitute policy values or source ratings for Request.
+
+In particular the unchanged vendor Fixed Request construction uses PDO voltage
+units for its operating-current bits. A 5V/3A PDO can therefore produce RDO
+0x1401912c (1A operating, 3A maximum), despite the existing 5000mV/3000mA policy
+print. This change observes that behavior; it does not correct negotiation.
+
+Run python3 tools/test-vim4-pd-handoff.py for host-only regression with the actual
+driver functions, mocked controller I/O and this tree's libfdt. It tests the
+Request bytes, PS_RDY gate, receive-buffer reuse, hard reset and both DT shapes.

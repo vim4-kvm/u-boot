@@ -503,5 +503,6 @@ int get_pd_port_num(void);
 void typec_discharge(void);
 int get_pd_output_val(int *pd_output_vol, int *pd_output_cur);
 int fusb302_init(void);
+int fusb302_fixup_fdt(void *blob);
 
 #endif /* FUSB302_H */

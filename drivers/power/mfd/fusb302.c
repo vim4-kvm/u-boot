@@ -44,6 +44,68 @@
 static struct fusb30x_chip chip;
 static struct udevice *fusb302_i2c_cur_bus;
 
+/* Boot-time observation only. Never read the controller from the FDT fixup. */
+#define PD_BOOT_COMPLETE       BIT(0)
+#define PD_BOOT_HARD_RESET_RX  BIT(1)
+#define PD_BOOT_HARD_RESET_TX  BIT(2)
+#define PD_BOOT_REQUEST_FAILED BIT(3)
+#define PD_BOOT_TIMEOUT        BIT(4)
+#define PD_BOOT_IO_ERROR       BIT(5)
+#define PD_BOOT_SINK_ATTACHED  BIT(6)
+#define PD_BOOT_TYPEC_FALLBACK  BIT(7)
+
+static struct {
+	u32 flags;
+	u32 source_header;
+	u32 request_header;
+	u32 rdo;
+	u32 count;
+	u32 rp;
+	u32 policy_mv;
+	u32 policy_ma;
+	u32 pdo[7];
+	bool request_pending;
+} boot_pd;
+
+int fusb302_fixup_fdt(void *blob)
+{
+	fdt32_t cells[16];
+	int chosen, i;
+	u32 flags = boot_pd.flags;
+
+	if ((flags & PD_BOOT_SINK_ATTACHED) && !(flags & PD_BOOT_COMPLETE))
+		flags |= PD_BOOT_TYPEC_FALLBACK;
+	cells[0] = cpu_to_fdt32(1);
+	cells[1] = cpu_to_fdt32(flags);
+	cells[2] = cpu_to_fdt32(boot_pd.source_header);
+	cells[3] = cpu_to_fdt32(boot_pd.request_header);
+	cells[4] = cpu_to_fdt32(boot_pd.rdo);
+	cells[5] = cpu_to_fdt32(boot_pd.count);
+	cells[6] = cpu_to_fdt32(boot_pd.rp);
+	cells[7] = cpu_to_fdt32(boot_pd.policy_mv);
+	cells[8] = cpu_to_fdt32(boot_pd.policy_ma);
+	for (i = 0; i < ARRAY_SIZE(boot_pd.pdo); i++)
+		cells[9 + i] = cpu_to_fdt32(boot_pd.pdo[i]);
+	chosen = fdt_path_offset(blob, "/chosen");
+	if (chosen < 0)
+		return chosen;
+	return fdt_setprop(blob, chosen, "khadas,usb-pd-boot", cells, sizeof(cells));
+}
+
+static void fusb302_report_boot_pd(void)
+{
+	int i;
+
+	if ((boot_pd.flags & PD_BOOT_SINK_ATTACHED) &&
+	    !(boot_pd.flags & PD_BOOT_COMPLETE))
+		boot_pd.flags |= PD_BOOT_TYPEC_FALLBACK;
+	printf("PD boot: flags=%02x source=%04x request=%04x rdo=%08x rp=%u policy=%umV/%umA\n",
+	       boot_pd.flags, boot_pd.source_header, boot_pd.request_header,
+	       boot_pd.rdo, boot_pd.rp, boot_pd.policy_mv, boot_pd.policy_ma);
+	for (i = 0; i < boot_pd.count; i++)
+		printf("PD boot: PDO %d=%08x\n", i + 1, boot_pd.pdo[i]);
+}
+
 static int fusb302_gpio_is_valid(int gpio)
 {
 	if (-1 == gpio)
@@ -116,8 +178,10 @@ int fusb302_i2c_read(u8 reg, u8 *val)
 
 	if (!ret)
 		ret = dm_i2c_read(dev, reg, val, 1);
-	if (ret != 0)
+	if (ret != 0) {
+		boot_pd.flags |= PD_BOOT_IO_ERROR;
 		printf("fusb302 i2c read error!!!\n");
+	}
 
 	return ret;
 }
@@ -130,8 +194,10 @@ int fusb302_i2c_write(u8 reg, u8 val)
 	ret = fusb302_i2c_get_cur_bus_chip(chip.addr, &dev);
 	if (!ret)
 		ret = dm_i2c_write(dev, reg, (u8 *)&val, 1);
-	if (ret != 0)
+	if (ret != 0) {
+		boot_pd.flags |= PD_BOOT_IO_ERROR;
 		printf("fusb302 i2c write error!!!\n");
+	}
 
 	return ret;
 }
@@ -159,8 +225,10 @@ int fusb302_i2c_raw_read(u8 reg, void *val, size_t val_len)
 	ret = fusb302_i2c_get_cur_bus_chip(chip.addr, &dev);
 	if (!ret)
 		ret = dm_i2c_read(dev, reg, val, val_len);
-	if (ret != 0)
+	if (ret != 0) {
+		boot_pd.flags |= PD_BOOT_IO_ERROR;
 		printf("fusb302 i2c read error!!!\n");
+	}
 
 	return ret;
 }
@@ -625,6 +693,14 @@ static enum tx_state policy_send_data(struct fusb30x_chip *chip)
 	debug("%s: chip->tx_state=%d\n", __func__, chip->tx_state);
 	switch (chip->tx_state) {
 	case 0:
+		if (PD_HEADER_CNT(chip->send_head) == 1 &&
+		    PD_HEADER_TYPE(chip->send_head) == DMT_REQUEST) {
+			boot_pd.request_header = chip->send_head;
+			boot_pd.rdo = chip->send_load[0];
+			boot_pd.policy_mv = chip->pd_output_vol;
+			boot_pd.policy_ma = chip->pd_output_cur;
+			boot_pd.request_pending = true;
+		}
 		senddata[pos++] = FUSB_TKN_SYNC1;
 		senddata[pos++] = FUSB_TKN_SYNC1;
 		senddata[pos++] = FUSB_TKN_SYNC1;
@@ -675,6 +751,9 @@ static void fusb_state_unattached(struct fusb30x_chip *chip, int evt)
 
 static void set_state_unattached(struct fusb30x_chip *chip)
 {
+	boot_pd.flags &= ~(PD_BOOT_COMPLETE | PD_BOOT_SINK_ATTACHED);
+	boot_pd.rp = 0;
+	boot_pd.request_pending = false;
 	debug("connection has disconnected\n");
 	tcpm_init(chip);
 	tcpm_set_rx_enable(chip, 0);
@@ -721,6 +800,8 @@ static void fusb_state_attach_wait_sink(struct fusb30x_chip *chip)
 
 static void fusb_state_attached_sink(struct fusb30x_chip *chip)
 {
+	boot_pd.flags |= PD_BOOT_SINK_ATTACHED;
+	boot_pd.rp = chip->cc1 ? chip->cc1 : chip->cc2;
 	chip->is_cc_connected = 1;
 	if (chip->cc_state & 0x01)
 		chip->cc_polarity = 0;
@@ -736,6 +817,10 @@ static void fusb_state_attached_sink(struct fusb30x_chip *chip)
 
 static void fusb_state_snk_startup(struct fusb30x_chip *chip)
 {
+	boot_pd.flags &= ~PD_BOOT_COMPLETE;
+	boot_pd.rdo = 0;
+	boot_pd.request_header = 0;
+	boot_pd.request_pending = false;
 	chip->is_pd_connected = 0;
 	chip->msg_id = 0;
 	chip->vdm_state = 0;
@@ -829,6 +914,11 @@ static void fusb_state_snk_evaluate_caps(struct fusb30x_chip *chip, int evt)
 {
 	u32 tmp;
 
+	boot_pd.source_header = chip->rec_head;
+	boot_pd.count = PD_HEADER_CNT(chip->rec_head);
+	memset(boot_pd.pdo, 0, sizeof(boot_pd.pdo));
+	memcpy(boot_pd.pdo, chip->rec_load, boot_pd.count * sizeof(u32));
+
 	chip->hardrst_count = 0;
 	chip->pos_power = 0;
 
@@ -879,6 +969,8 @@ static void fusb_state_snk_select_cap(struct fusb30x_chip *chip, int evt)
 		if (tmp == tx_success) {
 			chip->sub_state++;
 		} else if (tmp == tx_failed) {
+			boot_pd.flags |= PD_BOOT_REQUEST_FAILED;
+			boot_pd.request_pending = false;
 			set_state(chip, policy_snk_discovery);
 			break;
 		}
@@ -893,6 +985,8 @@ static void fusb_state_snk_select_cap(struct fusb30x_chip *chip, int evt)
 					break;
 				case CMT_WAIT:
 				case CMT_REJECT:
+					boot_pd.flags |= PD_BOOT_REQUEST_FAILED;
+					boot_pd.request_pending = false;
 					if (chip->is_pd_connected) {
 						printf("PD connected as UFP, fetching 5V\n");
 						set_state(chip,
@@ -923,6 +1017,8 @@ static void fusb_state_snk_transition_sink(struct fusb30x_chip *chip, int evt)
 	if (evt & EVENT_RX) {
 		if ((!PD_HEADER_CNT(chip->rec_head)) &&
 		    (PD_HEADER_TYPE(chip->rec_head) == CMT_PS_RDY)) {
+			if (boot_pd.request_pending)
+				boot_pd.flags |= PD_BOOT_COMPLETE;
 			chip->is_pd_connected = 1;
 			debug("PD connected as UFP, fetching 5V\n");
 			set_state(chip, policy_snk_ready);
@@ -987,6 +1083,9 @@ static void tcpc_alert(struct fusb30x_chip *chip, int *evt)
 	}
 
 	if (interrupta & INTERRUPTA_HARDRST) {
+		boot_pd.flags |= PD_BOOT_HARD_RESET_RX;
+		boot_pd.flags &= ~PD_BOOT_COMPLETE;
+		boot_pd.request_pending = false;
 
 		printf("HARDRESET>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
 
@@ -1000,6 +1099,9 @@ static void tcpc_alert(struct fusb30x_chip *chip, int *evt)
 	}
 
 	if (interrupta & INTERRUPTA_HARDSENT) {
+		boot_pd.flags |= PD_BOOT_HARD_RESET_TX;
+		boot_pd.flags &= ~PD_BOOT_COMPLETE;
+		boot_pd.request_pending = false;
 		chip->tx_state = tx_success;
 		*evt |= EVENT_TX;
 	}
@@ -1141,6 +1243,8 @@ int fusb302_init(void)
 	u8 id;
 	struct PD_CAP_INFO *pd_cap_info;
 
+	memset(&boot_pd, 0, sizeof(boot_pd));
+
 	chip.gpio_cc_int = FUSB302_INT_GPIO;
 	chip.gpio_discharge = -1; /* unused */
 	chip.gpio_vbus_5v = -1; /* unused */
@@ -1149,6 +1253,7 @@ int fusb302_init(void)
 
 	ret = fusb302_i2c_probe(6, chip.addr);
 	if (ret) {
+		boot_pd.flags |= PD_BOOT_IO_ERROR;
 		printf("fusb302 i2c probe failed: %d\n", ret);
 		return ret;
 	}
@@ -1181,6 +1286,7 @@ int fusb302_init(void)
 		state_machine_typec(&chip);
 		if (chip.conn_state == policy_snk_ready) {
 			update_port_num();
+			fusb302_report_boot_pd();
 			return 0;
 		}
 		if (chip.conn_state == attach_wait_source)
@@ -1190,6 +1296,9 @@ int fusb302_init(void)
 	if (chip.conn_state > attached_sink) {
 		update_port_num();
 	}
+	if (!wait_for_complete)
+		boot_pd.flags |= PD_BOOT_TIMEOUT;
+	fusb302_report_boot_pd();
 
 	return 0;
 }
