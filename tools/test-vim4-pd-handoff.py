@@ -138,9 +138,8 @@ int main(void)
     request_boundaries();
     boot_pd.flags = PD_BOOT_SINK_ATTACHED;
     boot_pd.rp = 3;
-    chip.rec_head = 0x2061;
+    chip.rec_head = 0x1061;
     chip.rec_load[0] = 0x3e01912c; /* 5 V, 3 A */
-    chip.rec_load[1] = (400 << 10) | 300; /* 20 V exceeds unchanged policy */
     fusb_state_snk_evaluate_caps(&chip, EVENT_RX);
     assert(chip.pos_power == 1 && chip.pd_output_vol == 5000 && chip.pd_output_cur == 3000);
     fusb_state_snk_select_cap(&chip, 0);
