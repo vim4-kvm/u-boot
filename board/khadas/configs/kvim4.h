@@ -615,7 +615,7 @@
 #define CONFIG_FULL_RAMDUMP
 
 #define BL32_SHARE_MEM_SIZE  0x800000
-#define CONFIG_AML_KASLR_SEED
+/* ft_board_setup supplies fresh seeds; do not overwrite them in boot_jump. */
 
 #endif
 
