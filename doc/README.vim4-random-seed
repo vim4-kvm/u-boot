@@ -3,9 +3,12 @@ VIM4 boot randomness (offline candidate)
 
 ft_board_setup creates /chosen/kaslr-seed (one big-endian u64) and rng-seed
 (32 opaque bytes) from separate T7 RNG samples. The CFG at 0xfe440788 and
-OUT0 at 0xfe440790 follow the version-2 handshake in the vendor Linux
-common_drivers/drivers/char/hw_random/meson-rng.c. Polls are bounded to 10 ms
-per status bit. No seed value is printed, persisted to the environment, or
+OUT0 at 0xfe440790 follow arch/arm/mach-meson/t7/hw_rng.c: wait for
+READY (0xfe440780) bit 0, wait for CFG bit 0, start CFG bit 31, wait for it
+to clear, read OUT0 and acknowledge READY with 1. The original d1c2033
+copied the Linux handshake and omitted READY arbitration/acknowledgement.
+Polls are bounded to 10 ms per status bit; a non-returning bus transaction
+cannot be bounded by a software loop. No seed value is printed, persisted to the environment, or
 derived from a timer. Obvious stuck output is rejected, but these checks
 are not an entropy certification.
 
@@ -22,14 +25,30 @@ boot continues without this optional handoff. There is no fallback PRNG.
 Linux 7.3 consumes/clears these properties: a missing live rng-seed property
 alone is not evidence that firmware failed to supply it.
 
-Run python3 tools/test-vim4-random-seed.py and the existing PD handoff test.
+Run python3 tools/test-vim4-random-seed.py, tools/test-vim4-dtb-load.py and
+the existing PD handoff test.
 The host test compiles the actual functions and libfdt, with mocked MMIO,
-covering fresh FDTs, retries, byte order, bounded faults and allocation
+covering READY/CFG/OUT0/ACK ordering, fresh FDTs, retries, byte order, all
+three bounded polling faults and allocation
 rollback. Build and repack as documented in VIM4.md using private O= and
 BL33Z BUILD_BASE directories. No board flash or boot test is implied.
 
-Before any separately authorized flash, compare every non-BL33 device-FIP
+The d54877c9f5 combined candidate reset repeatedly during early reserved-DTB
+loading, before ft_board_setup or RNG access. This is not evidence of an RNG
+bus fault. Linux VIM4 now loads its filesystem DTB directly and rejects the
+common raw reserved-DTB fallback, which can otherwise repair Android copies
+inside an unrelated Linux filesystem. The physical reset mechanism remains
+unconfirmed; this change removes that path, not a proven watchdog diagnosis.
+The signed BL31 blob is unchanged; no matching BL31 source/exception trace
+was available to establish an EL3 reset cause.
+
+Before any eMMC flash, first boot the candidate from removable microSD and
+verify PD, actual HID and seeds across cold boot and two normal reboots.
+Remove the card and cold power-cycle to return to the retained eMMC firmware.
+Compare every non-BL33 device-FIP
 payload against the deployed pd-handoff image and retain its full prefix
 backup. The existing SD/eMMC procedure must preserve sector-zero bytes
 442..511 and the partition layout. A boot failure can require physical SPI
-OOWOW/RESET recovery; this candidate is not suitable for unattended flashing.
+OOWOW recovery. FUNCTION+RESET relies on the eMMC U-Boot reaching its key
+check; with this early failure, remove SD and hold FUNCTION during cold
+power-on instead. This candidate is not suitable for unattended flashing.

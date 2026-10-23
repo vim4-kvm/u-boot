@@ -368,6 +368,7 @@ int ft_board_setup(void *blob, bd_t *bd)
 	/* Optional telemetry must not prevent either kernel from booting. */
 	if (ret)
 		printf("PD boot FDT handoff unavailable: %s\n", fdt_strerror(ret));
+	puts("Boot random seed: entering T7 RNG handoff\n");
 	ret = vim4_random_seed_fixup(blob);
 	if (ret)
 		printf("Boot random seed handoff unavailable: %d\n", ret);

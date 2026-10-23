@@ -20,21 +20,40 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 #define BIT(n) (1U << (n))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
-#define RNG_REE_CFG 0
-#define RNG_REE_OUT0 8
+#define RNG_REE_READY 0
+#define RNG_REE_CFG 8
+#define RNG_REE_OUT0 16
 static u32 input[10], stuck;
-static int sample, fault_at, delays;
-static u32 readl(int address) {
-    if (address == RNG_REE_OUT0) return input[sample];
-    return sample == fault_at ? stuck : 0;
+static int sample, fault_at, delays, fault_reg, acks, phase;
+static u32 readl(unsigned long address) {
+    /* Reject a CFG access before READY arbitration, or a new conversion
+     * before OUT0 was acknowledged. These accesses were missing in d1c2033.
+     */
+    if (address == RNG_REE_READY) {
+        assert(phase == 0);
+        if (sample + 1 == fault_at && fault_reg == RNG_REE_READY) return stuck;
+        phase = 1; return 0;
+    }
+    if (address == RNG_REE_OUT0) {
+        assert(phase == 3); phase = 4; return input[sample];
+    }
+    assert(address == RNG_REE_CFG && (phase == 1 || phase == 2 || phase == 3));
+    int next = phase == 1 ? sample + 1 : sample;
+    if (next == fault_at && fault_reg == RNG_REE_CFG &&
+        ((stuck == BIT(0) && phase == 1) || (stuck == BIT(31) && phase == 2))) return stuck;
+    if (phase == 2) phase = 3;
+    return 0;
 }
 static void writel(u32 value, int address) {
+    if (address == RNG_REE_READY) {
+        assert(value == BIT(0) && phase == 4); acks++; phase = 0; return;
+    }
     assert(address == RNG_REE_CFG && (value & BIT(31)));
-    sample++;
+    assert(phase == 1); sample++; phase = 2;
 }
 static void udelay(int us) { assert(us == 10); delays++; }
 static void reset(void) {
-    sample=-1; fault_at=-2; stuck=0; delays=0;
+    sample=-1; fault_at=-2; stuck=0; delays=0; acks=0; phase=0; fault_reg=RNG_REE_CFG;
     for (int i=0;i<10;i++) input[i]=0x12345670+i;
 }
 '''
@@ -53,6 +72,7 @@ int main(void) {
     char blob[4096]; int node,len,ret;
     reset(); node=tree(blob,sizeof(blob));
     assert(vim4_random_seed_fixup(blob)==0);
+    assert(acks==10 && phase==0);
     const fdt64_t *seed=fdt_getprop(blob,node,"kaslr-seed",&len);
     assert(seed && len==8 && fdt64_to_cpu(*seed)==0x1234567012345671ULL);
     const void *rng=fdt_getprop(blob,node,"rng-seed",&len);
@@ -63,11 +83,13 @@ int main(void) {
     assert(vim4_random_seed_fixup(blob)==0);
     seed=fdt_getprop(blob,node,"kaslr-seed",&len);
     assert(len==8 && fdt64_to_cpu(*seed)==0x7654321012345671ULL);
-    /* Each timeout removes old seeds and stops before reading stale OUT0. */
-    for (int bit=0;bit<=31;bit+=31) {
-        reset(); fault_at=3; stuck=BIT(bit);
+    /* READY, pre-start busy, and generation timeout each fail without OUT0. */
+    for (int mode=0;mode<3;mode++) {
+        reset(); fault_at=3;
+        fault_reg=mode==0 ? RNG_REE_READY : RNG_REE_CFG;
+        stuck=mode==2 ? BIT(31) : BIT(0);
         assert(vim4_random_seed_fixup(blob)==-ETIMEDOUT);
-        assert(delays==1000 && sample==3); absent(blob);
+        assert(delays==1000 && acks==3 && sample==(mode==2 ? 3 : 2)); absent(blob);
     }
     for (int mode=0;mode<3;mode++) {
         reset(); input[4]=mode==0?0:mode==1?~0U:input[3];
@@ -82,7 +104,7 @@ int main(void) {
     }
     reset(); assert(fdt_create_empty_tree(blob,sizeof(blob))==0);
     assert(vim4_random_seed_fixup(blob)==-FDT_ERR_NOTFOUND && sample==-1);
-    puts("PASS: fresh seeds, FDT encoding, retry, bounded RNG faults and allocation rollback");
+    puts("PASS: T7 READY/CFG/OUT0/ACK order, all three timeouts, fresh seeds, retry and FDT rollback");
 }
 '''
     libfdt = root / 'scripts/dtc/libfdt'

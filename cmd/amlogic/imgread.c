@@ -488,6 +488,14 @@ static int do_image_read_dtb_from_knl(const char *partname,
 /*uint32_t store_rsv_size(const char *name);*/
 static int do_image_read_dtb_from_rsv(unsigned char* loadaddr)
 {
+#if defined(CONFIG_TARGET_KHADAS_VIM4) && !defined(CONFIG_DTB_BIND_KERNEL)
+	/* The common late-init fallback also calls this after a failed file load.
+	 * A Linux MBR image has no Android reserved DTB: probing it can read
+	 * unrelated filesystem blocks and dtb_read() may repair copies there.
+	 */
+	errorP("VIM4 Linux boot: reserved DTB access disabled; use filesystem DTB\n");
+	return -EOPNOTSUPP;
+#else
 	const int dtbmaxsz = store_rsv_size("dtb");
 
 	android_img = false;
@@ -529,6 +537,7 @@ static int do_image_read_dtb_from_rsv(unsigned char* loadaddr)
 	}
 #endif
 	return 0;
+#endif
 }
 
 //imgread dtb boot ${dtb_mem_addr}
