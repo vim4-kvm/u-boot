@@ -7,12 +7,12 @@
 #include "random-seed.h"
 
 /* Bound each handshake so an unavailable RNG cannot prevent booting. */
-static int vim4_rng_wait(u32 mask)
+static int vim4_rng_wait(unsigned long reg, u32 mask)
 {
 	unsigned int i;
 
 	for (i = 0; i < 1000; i++) {
-		if (!(readl(RNG_REE_CFG) & mask))
+		if (!(readl(reg) & mask))
 			return 0;
 		udelay(10);
 	}
@@ -23,15 +23,21 @@ static int vim4_rng_read(u32 *word)
 {
 	int ret;
 
-	/* T7 uses the version-2 CFG/OUT0 handshake, also used by Linux. */
-	writel(readl(RNG_REE_CFG) | BIT(31), RNG_REE_CFG);
-	ret = vim4_rng_wait(BIT(31));
+	/* Match T7 BL33 rand(): READY arbitration precedes CFG, then ack OUT0.
+	 * Linux's shorter handshake is not the boot firmware interface.
+	 */
+	ret = vim4_rng_wait(RNG_REE_READY, BIT(0));
 	if (ret)
 		return ret;
-	ret = vim4_rng_wait(BIT(0));
+	ret = vim4_rng_wait(RNG_REE_CFG, BIT(0));
+	if (ret)
+		return ret;
+	writel(readl(RNG_REE_CFG) | BIT(31), RNG_REE_CFG);
+	ret = vim4_rng_wait(RNG_REE_CFG, BIT(31));
 	if (ret)
 		return ret;
 	*word = readl(RNG_REE_OUT0);
+	writel(BIT(0), RNG_REE_READY);
 	return 0;
 }
 
